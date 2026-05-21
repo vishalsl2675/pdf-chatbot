@@ -1,18 +1,19 @@
 import os
-import shutil
 import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import FastEmbedEmbeddings
+
 from langchain_groq import ChatGroq
-from langchain_chroma import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
 
 
-# =====================================================
+# ======================================================
 # LOAD ENV VARIABLES
-# =====================================================
+# ======================================================
 
 load_dotenv()
 
@@ -23,27 +24,26 @@ if not groq_api_key:
     st.stop()
 
 
-# =====================================================
-# STREAMLIT PAGE CONFIG
-# =====================================================
+# ======================================================
+# PAGE CONFIG
+# ======================================================
 
 st.set_page_config(
-    page_title="PDF Chatbot with ChromaDB",
+    page_title="Advanced PDF Chatbot",
     page_icon="📄",
     layout="wide"
 )
 
+
+# ======================================================
+# CUSTOM CSS
+# ======================================================
+
 st.markdown("""
 <style>
 
-.main {
-    background-color: #0E1117;
-}
-
 .stTextInput input {
     border-radius: 10px;
-    border: 2px solid #FF4B4B;
-    padding: 10px;
 }
 
 .stButton button {
@@ -51,32 +51,46 @@ st.markdown("""
     border-radius: 10px;
     height: 45px;
     font-size: 16px;
-    font-weight: bold;
 }
 
 </style>
 """, unsafe_allow_html=True)
 
 
-# =====================================================
+# ======================================================
 # LOAD LLM
-# =====================================================
+# ======================================================
 
 @st.cache_resource
 def load_llm():
 
-    model = ChatGroq(
+    llm = ChatGroq(
         groq_api_key=groq_api_key,
+
+        # BETTER MODEL FOR DETAILED ANSWERS
         model_name="llama-3.3-70b-versatile",
+
         temperature=0.3
     )
 
-    return model
+    return llm
 
 
-# =====================================================
-# PDF READING
-# =====================================================
+# ======================================================
+# LOAD EMBEDDINGS
+# ======================================================
+
+@st.cache_resource
+def load_embeddings():
+
+    embeddings = FastEmbedEmbeddings()
+
+    return embeddings
+
+
+# ======================================================
+# READ PDF TEXT
+# ======================================================
 
 def get_pdf_text(pdf_docs):
 
@@ -102,15 +116,19 @@ def get_pdf_text(pdf_docs):
     return text
 
 
-# =====================================================
-# TEXT CHUNKING
-# =====================================================
+# ======================================================
+# CREATE TEXT CHUNKS
+# ======================================================
 
 def get_text_chunks(text):
 
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=150
+
+        # LARGER CHUNKS
+        chunk_size=1000,
+
+        # BETTER CONTEXT OVERLAP
+        chunk_overlap=200
     )
 
     chunks = text_splitter.split_text(text)
@@ -118,54 +136,50 @@ def get_text_chunks(text):
     return chunks
 
 
-# =====================================================
-# CREATE VECTOR STORE
-# =====================================================
+# ======================================================
+# CREATE FAISS VECTOR STORE
+# ======================================================
 
 def create_vector_store(chunks):
 
-    # DELETE OLD DATABASE
-    if os.path.exists("chroma_db"):
-        shutil.rmtree("chroma_db")
+    embeddings = load_embeddings()
 
-    embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-small-en-v1.5"
-    )
-
-    vector_store = Chroma.from_texts(
-        texts=chunks,
-        embedding=embeddings,
-        persist_directory="chroma_db"
+    vector_store = FAISS.from_texts(
+        chunks,
+        embedding=embeddings
     )
 
     st.session_state.vector_store = vector_store
 
 
-# =====================================================
+# ======================================================
 # RETRIEVE RELEVANT CHUNKS
-# =====================================================
+# ======================================================
 
-def retrieve_relevant_chunks(question, top_k=8):
+def retrieve_relevant_chunks(question):
 
-    retriever = st.session_state.vector_store.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": top_k}
+    docs = st.session_state.vector_store.similarity_search(
+
+        question,
+
+        # MORE CHUNKS FOR BETTER ANSWERS
+        k=6
     )
-
-    docs = retriever.invoke(question)
 
     relevant_chunks = []
 
     for doc in docs:
 
-        relevant_chunks.append(doc.page_content)
+        relevant_chunks.append(
+            doc.page_content
+        )
 
     return "\n\n".join(relevant_chunks)
 
 
-# =====================================================
-# USER QUESTION HANDLING
-# =====================================================
+# ======================================================
+# HANDLE USER QUESTION
+# ======================================================
 
 def user_input(user_question):
 
@@ -176,41 +190,46 @@ def user_input(user_question):
 
     try:
 
+        # RETRIEVE RELEVANT CONTEXT
         relevant_text = retrieve_relevant_chunks(
-            user_question,
-            top_k=8
+            user_question
         )
 
+        # ADVANCED PROMPT
         prompt = f"""
-You are an advanced AI PDF assistant.
+You are an intelligent PDF assistant.
 
-Your task is to answer ONLY using the provided PDF context.
+Your task is to answer the user's question ONLY using the provided context.
 
-GUIDELINES:
-- Give detailed answers.
-- Explain in simple language.
-- Use headings and bullet points.
-- Explain step-by-step if needed.
-- Include examples from context.
-- If answer is incomplete, clearly mention limitations.
-- Do NOT hallucinate.
-- If answer not found, say:
-  "Answer is not available in the provided PDF."
+Instructions:
+- Give detailed and well-structured answers.
+- Explain concepts clearly in simple language.
+- Use bullet points when needed.
+- Include all important information from the context.
+- Give examples if available in the context.
+- Do not repeat sentences.
+- If the answer is partially available, mention that clearly.
+- Do not make up information outside the context.
+- If the answer is not present in the context, say:
+  "Answer is not available in the context."
 
-CONTEXT:
+Context:
 {relevant_text}
 
-QUESTION:
+Question:
 {user_question}
 
-DETAILED ANSWER:
+Detailed Answer:
 """
 
+        # LOAD MODEL
         model = load_llm()
 
+        # GENERATE RESPONSE
         response = model.invoke(prompt)
 
-        st.subheader("📌 Answer")
+        # DISPLAY ANSWER
+        st.subheader("Detailed Reply")
 
         st.write(response.content)
 
@@ -219,32 +238,39 @@ DETAILED ANSWER:
         st.error(f"Error: {str(e)}")
 
 
-# =====================================================
+# ======================================================
 # MAIN FUNCTION
-# =====================================================
+# ======================================================
 
 def main():
 
-    st.title("Chat with PDF using Groq + ChromaDB 🚀")
+    st.title("Chat with PDF using Groq + FAISS 🚀")
 
+    st.write(
+        "Upload PDF files and ask detailed questions from the documents."
+    )
+
+    # USER QUESTION
     user_question = st.text_input(
         "Ask a Question from the PDF Files"
     )
 
     if user_question:
 
-        with st.spinner("Generating Answer..."):
+        with st.spinner("Generating Detailed Answer..."):
 
             user_input(user_question)
 
-    # ================= SIDEBAR =================
+    # ==================================================
+    # SIDEBAR
+    # ==================================================
 
     with st.sidebar:
 
-        st.header("📂 Upload PDF Files")
+        st.header("Menu")
 
         pdf_docs = st.file_uploader(
-            "Upload your PDF Files",
+            "Upload PDF Files",
             accept_multiple_files=True
         )
 
@@ -256,7 +282,7 @@ def main():
 
                     with st.spinner("Processing PDFs..."):
 
-                        # READ PDF
+                        # EXTRACT TEXT
                         raw_text = get_pdf_text(pdf_docs)
 
                         if not raw_text.strip():
@@ -265,27 +291,35 @@ def main():
                             return
 
                         # CREATE CHUNKS
-                        text_chunks = get_text_chunks(raw_text)
+                        text_chunks = get_text_chunks(
+                            raw_text
+                        )
 
                         # CREATE VECTOR STORE
-                        create_vector_store(text_chunks)
+                        create_vector_store(
+                            text_chunks
+                        )
 
                         st.success(
-                            "PDF Processing Completed Successfully ✅"
+                            "PDF Processing Completed Successfully"
                         )
 
                 except Exception as e:
 
-                    st.error(f"Processing Error: {str(e)}")
+                    st.error(
+                        f"Processing Error: {str(e)}"
+                    )
 
             else:
 
-                st.warning("Please upload at least one PDF")
+                st.warning(
+                    "Please upload at least one PDF"
+                )
 
 
-# =====================================================
-# RUN APPLICATION
-# =====================================================
+# ======================================================
+# RUN APP
+# ======================================================
 
 if __name__ == "__main__":
 
